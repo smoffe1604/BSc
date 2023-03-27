@@ -12,31 +12,31 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
-from datetime import datetime
 
 import pickle 
 
-
-#prep data
-#with open('../data/sampled_filters_train.pkl', 'rb') as f:
-#    data = pickle.load(f)
-with open('sampled_filters_train.pkl', 'rb') as f:
+with open('data/sampled_filters_train.pkl', 'rb') as f:
     data = pickle.load(f)
 
 wavelengths = data['wavelengths']
 spectra = data['spectra']
 z = data['z']
-X = data['X']
-df_X = pd.DataFrame(X)
+df_X = pd.DataFrame(data['X'])
+outlier_columns = df_X.columns[df_X.eq(58.9).any(axis = 0)]
+df_X = df_X.drop(outlier_columns, axis = 1)
+X = df_X.to_numpy()
+
+scaler = StandardScaler()
+X_normalized = scaler.fit_transform(df_X)
+
 names=data['filter_names']
 filter_wls = [int(name[1:-1].rstrip('W')) for name in names]
+filter_wls = [element for i, element in enumerate(filter_wls) if i not in outlier_columns]
 indices=[0,10,30,500,15000,800000]
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using {device} device")
 
-#U-net model
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(DoubleConv, self).__init__()
@@ -56,12 +56,24 @@ class DoubleConv(nn.Module):
         x = self.relu2(x)
         return x
 
+class SingleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(SingleConv, self).__init__()
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.bn = nn.BatchNorm1d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        return x
+
 class Down(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(Down, self).__init__()
         self.conv = DoubleConv(in_channels, out_channels)
         self.pool = nn.MaxPool1d(kernel_size=2, stride=2)
-        
         
     def forward(self, x):
         x = self.pool(x)
@@ -83,50 +95,106 @@ class Up(nn.Module):
         x = self.conv(x)
         return x
 
-class UNet(nn.Module):
+class BigUNet(nn.Module):
     def __init__(self):
-        super(UNet, self).__init__()
+        super(BigUNet, self).__init__()
         self.conv = DoubleConv(1, 64)
         self.down1 = Down(64, 128)
         self.down2 = Down(128, 256)
         self.down3 = Down(256, 512)
-        self.down4 = Down(512, 1024)
-        self.up1 = Up(1024, 512)
         self.up2 = Up(512, 256)
         self.up3 = Up(256, 128)
         self.up4 = Up(128, 64)
         self.convOut = nn.Conv1d(64, 1, kernel_size = 1)
 
-        
     def forward(self, x):
         x1 = self.conv(x)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
         x4 = self.down3(x3)
-        x5 = self.down4(x4)
-        x4 = self.up1(x5, x4)
+        x3 = self.up2(x4, x3)
+        x2 = self.up3(x3, x2)
+        x1 = self.up4(x2, x1)
+        x = self.convOut(x1)
+        return x
+    
+class MedBigUNet(nn.Module):
+    def __init__(self):
+        super(MedBigUNet, self).__init__()
+        self.conv = DoubleConv(1, 32)
+        self.down1 = Down(32, 64)
+        self.down2 = Down(64, 128)
+        self.down3 = Down(128, 256)
+        self.up2 = Up(256, 128)
+        self.up3 = Up(128, 64)
+        self.up4 = Up(64, 32)
+        self.convOut = nn.Conv1d(32, 1, kernel_size = 1)
+
+    def forward(self, x):
+        x1 = self.conv(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
         x3 = self.up2(x4, x3)
         x2 = self.up3(x3, x2)
         x1 = self.up4(x2, x1)
         x = self.convOut(x1)
         return x
 
-#generate dataset
-def add_noise(X, T):
-    T += 1
-    if T != 1:
-        beta1, beta2 = 0.0001, 0.2
-        beta_t = np.arange(beta1, beta2 + 0.0001, (beta2 - beta1)/(T - 1) )
-    else: 
-        beta_t = [0.0001]
-    alpha = [1-beta_t[t] for t in range(len(beta_t))]
-    alpha_bar = np.prod(alpha[:T-1])
+class MediumUNet(nn.Module):
+    def __init__(self):
+        super(MediumUNet, self).__init__()
+        self.conv = DoubleConv(1, 64)
+        self.down1 = Down(64, 128)
+        self.down2 = Down(128, 256)
+        self.up1 = Up(256, 128)
+        self.up2 = Up(128, 64)
+        self.convOut = nn.Conv1d(64, 1, kernel_size = 1)
+        
+    def forward(self, x):
+        x1 = self.conv(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x2 = self.up1(x3, x2)
+        x1 = self.up2(x2, x1)
+        x = self.convOut(x1)
+        return x
 
+class SmallUNet(nn.Module):
+    def __init__(self):
+        super(SmallUNet, self).__init__()
+        self.conv = DoubleConv(1, 32)
+        self.down1 = DoubleConv(32, 64)
+        self.down2 = DoubleConv(64, 128)
+        self.up1 = Up(128, 64)
+        self.up2 = Up(64, 32)
+        self.convOut = nn.Conv1d(32, 1, kernel_size = 1)
+        
+    def forward(self, x):
+        x1 = self.conv(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x2 = self.up1(x3, x2)
+        x1 = self.up2(x2, x1)
+        x = self.convOut(x1)
+        return x
+
+
+def add_noise(X, t, T = 100):
+
+    #beta0, betaT = 0.0001, 0.2
+    beta_t = np.array([0.0001 * (1.05**i) for i in range(T)])
+    
+    
+    alpha = [1-beta_t[i] for i in range(len(beta_t))]
+    alpha_bar = np.prod(alpha[:t-1])
+    
     mu, sigma = math.sqrt(alpha_bar) * X, (1 - alpha_bar) * np.identity(len(X))
     X_tm1 = np.random.multivariate_normal(mu, sigma)
     mu, sigma = math.sqrt(1 - beta_t[T-1]) * X_tm1, (beta_t[T-1]) * np.identity(len(X_tm1))
     X_t = np.random.multivariate_normal(mu, sigma)
-    return list(X_t), list(X_tm1)
+    pred_noise =  X_t - X_tm1
+    return list(X_t), list(pred_noise)
 
 def gen_dataset(data):
     dataset = {
@@ -135,8 +203,8 @@ def gen_dataset(data):
     }
 
     for d in data:
-        T = random.randint(1, 100)
-        X_t, X_tm1 = add_noise(d, T)
+        t = random.randint(1, 100)
+        X_t, X_tm1 = add_noise(d, t)
         dataset["X_t"].append(X_t)
         dataset["X_tm1"].append(X_tm1)
     dataset["X_t"] = np.array(dataset["X_t"])
@@ -156,86 +224,92 @@ class MyDataset(Dataset):
         data = {key: self.data_dict[key][index] for key in self.keys}
         return data
     
-    
-model = UNet().double().to(device)
-#loss
-loss_fn = nn.MSELoss()
-#optimizer
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-running_loss_arr = np.array([])
-def train_one_epoch(epoch_index, running_loss_arr):
-    running_loss = 0.
-    last_loss = 0.
-
-    # Here, we use enumerate(training_loader) instead of
-    # iter(training_loader) so that we can track the batch
-    # index and do some intra-epoch reporting
-    for i, data in enumerate(train_dataloader):
-        # Every data instance is an input + label pair
-        X_t, X_tm1 = data.values()
-        X_t = X_t.unsqueeze(1).double().to(device)
-        X_tm1 = X_tm1.unsqueeze(1).double().to(device)
-        # Zero your gradients for every batch!
-        optimizer.zero_grad()
-
-        # Make predictions for this batch
-        outputs = model(X_t)
-        
-        # Compute the loss and its gradients
-        loss = loss_fn(outputs, X_tm1)
-
-        loss.backward()
-
-        # Adjust learning weights
-        optimizer.step()
-
-        # Gather data and report
-        running_loss += loss.item()
-        if i % 100 == 99:
-            last_loss = running_loss / 100 # loss per batch
-            tb_x = epoch_index * len(train_dataloader) + i + 1
-            running_loss_arr = np.append(running_loss_arr, [tb_x, last_loss])
-            running_loss = 0.
-
-    return running_loss_arr
+def print_metaData(n, batch_size):
+    print(n, batch_size)
 
 
-n = 32000
-scaler = StandardScaler()
-X_normalized = np.array([list(scaler.fit_transform(torch.tensor(X[i]).reshape(-1, 1)).reshape(1, -1)) for i in range(n)]).squeeze()
-dataset = MyDataset(gen_dataset(X_normalized[0:n]))
-
-train_dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
-
-
-epoch_number = 0
-
-EPOCHS = 1
+model_big = BigUNet().double().to(device)
+model_medBig = MedBigUNet().double().to(device)
+model_medium = MediumUNet().double().to(device)
+model_small = SmallUNet().double().to(device)
+modelList = [model_big, model_medBig, model_medium, model_small]
+modelNames = ["model_big", "model_medBig", "model_medium", "model_small"]
 
 
-for epoch in range(EPOCHS):
-    print('EPOCH {}:'.format(epoch_number + 1))
+def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
+    #loss
+    loss_fn = nn.MSELoss()
+    #optimizer
+    optimizer = optim.Adam(model_big.parameters(), lr=0.001)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
-    # Make sure gradient tracking is on, and do a pass over the data
+    #loss data
+    running_loss_arr = []
+
+    #training
     model.train(True)
-    running_loss_arr = train_one_epoch(epoch_number, running_loss_arr)
+    for epoch in range(EPOCHS):
+        # generate data_loader
+        dataset = MyDataset(gen_dataset(X_normalized[0:n]))
+        train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        
+        
+        
+        print('EPOCH ', epoch, ":")
+        
+        running_loss = 0
+        last_loss = 0
 
-    # We don't need gradients on to do reporting
+        for i, data in enumerate(train_dataloader):
+            # Every data instance is an input + label pair
+            X_t, X_tm1 = data.values()
+            X_t = X_t.unsqueeze(1).double().to(device)
+            X_tm1 = X_tm1.unsqueeze(1).double().to(device)
+            # Zero gradients for every batch
+            optimizer.zero_grad()
+
+            # Make predictions for this batch
+            outputs = model(X_t)
+            
+            # Compute the loss and its gradients
+            loss = loss_fn(outputs, X_tm1)
+
+            loss.backward()
+
+            # Adjust learning weights
+            optimizer.step()
+
+            # Gather data
+            running_loss += loss.item()
+            if (i+1) % 100 == 0:
+                last_loss = running_loss / 100 # loss per batch
+                tb_x = epoch * len(train_dataloader) + i + 1
+                running_loss_arr.append([tb_x, last_loss])
+                running_loss = 0.
+
+        scheduler.step()
+
+        print('LOSS train: ', running_loss_arr[-1])
+
     model.train(False)
+    return np.array(running_loss_arr)
 
+
+n = 64000
+batch_size = 64
+epochs = 1
+for name, model in zip(modelNames, modelList):
+    print("#####################################")
+    print("n: ", n)
+    print("batch_size: ", batch_size)
+    print("Epochs: ", epochs)
+    print("model: ", model)
     
-    print('LOSS train: ', running_loss_arr[-1])
+    running_loss_arr = train_model(model, n = n, batch_size = batch_size, EPOCHS = epochs)
 
-
-
-    # Track best performance, and save the model's state
-
-    epoch_number += 1
-
-
-torch.save(model.state_dict(), 'model_param.pt')
-df_loss = pd.DataFrame({"time": running_loss_arr.reshape(-1, 2).transpose()[0], "loss": running_loss_arr.reshape(-1, 2).transpose()[1]})
-df_loss.to_csv('losses.csv', index = False)
+    torch.save(model.state_dict(), 'output/model_param_' + name + '.pt')
+    df_loss = pd.DataFrame({"time": running_loss_arr.reshape(-1, 2).transpose()[0], "loss": running_loss_arr.reshape(-1, 2).transpose()[1]})
+    df_loss.to_csv('output/losses' + name + '.csv', index = False)
+    print("#####################################")
 
 
