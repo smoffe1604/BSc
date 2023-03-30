@@ -18,21 +18,34 @@ import pickle
 with open('data/sampled_filters_train.pkl', 'rb') as f:
     data = pickle.load(f)
 
-wavelengths = data['wavelengths']
-spectra = data['spectra']
-z = data['z']
-df_X = pd.DataFrame(data['X'])
-outlier_columns = df_X.columns[df_X.eq(58.9).any(axis = 0)]
-df_X = df_X.drop(outlier_columns, axis = 1)
-X = df_X.to_numpy()
+def get_data(data):
+    #in data
+    #wavelength (4000000, 149)
+    #spectra (4000000, 149)
+    #X (4000000, 37)
+    #y (4000000, 4)
+    #z (4000000, 1)
+    #zmin (float)
+    #zmax (float)
+    #filter_names (string list), len = 37
+    df_X = pd.DataFrame(data['X'])
+    outlier_columns = df_X.columns[df_X.gt(58.8).any(axis = 0)]
+    df_X = df_X.drop(outlier_columns, axis = 1)
+    X = df_X.to_numpy()
+    y = pd.DataFrame(data['y'])
+    z = pd.DataFrame(data['z'])
+    wavelengths = data['wavelengths']
+    spectra = data['spectra']
+    
+    scaler = StandardScaler()
+    X_normalized = scaler.fit_transform(df_X)
 
-scaler = StandardScaler()
-X_normalized = scaler.fit_transform(df_X)
-
-names=data['filter_names']
-filter_wls = [int(name[1:-1].rstrip('W')) for name in names]
-filter_wls = [element for i, element in enumerate(filter_wls) if i not in outlier_columns]
-indices=[0,10,30,500,15000,800000]
+    names=data['filter_names']
+    filter_wls = [int(name[1:-1].rstrip('W')) for name in names]
+    filter_wls = [element for i, element in enumerate(filter_wls) if i not in outlier_columns]
+    indices=[0,10,30,500,15000,800000]
+    return filter_wls, wavelengths, spectra, X, X_normalized, y, z
+filter_wls, wavelengths, spectra, X, X_normalized, y, z = get_data(data)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using {device} device")
@@ -180,36 +193,39 @@ class SmallUNet(nn.Module):
         return x
 
 
-def add_noise(X, t, T = 100):
+def add_noise(X, t, beta_t, alpha, alpha_bar, T = 100):
 
-    #beta0, betaT = 0.0001, 0.2
-    beta_t = np.array([0.0001 * (1.05**i) for i in range(T)])
-    
-    
-    alpha = [1-beta_t[i] for i in range(len(beta_t))]
-    alpha_bar = np.prod(alpha[:t-1])
-    
-    mu, sigma = math.sqrt(alpha_bar) * X, (1 - alpha_bar) * np.identity(len(X))
+    mu, sigma = math.sqrt(alpha_bar[t]) * X, (1 - alpha_bar[t]) * np.identity(len(X))
     X_tm1 = np.random.multivariate_normal(mu, sigma)
-    mu, sigma = math.sqrt(1 - beta_t[T-1]) * X_tm1, (beta_t[T-1]) * np.identity(len(X_tm1))
+    mu, sigma = math.sqrt(1 - beta_t[t]) * X_tm1, (beta_t[t]) * np.identity(len(X_tm1))
     X_t = np.random.multivariate_normal(mu, sigma)
     pred_noise =  X_t - X_tm1
     return list(X_t), list(pred_noise)
 
 def gen_dataset(data):
-    dataset = {
-        "X_t": [],
-        "X_tm1": []
-    }
+    T = 100
+
+    X_t_arr = []
+    X_tm1_arr = []
+
+    beta_t = np.array([0.0001 * (1.05**i) for i in range(T)])
+    alpha = np.array([1-beta_t[i] for i in range(len(beta_t))])
+    alpha_bar = np.cumprod(alpha)
 
     for d in data:
-        t = random.randint(1, 100)
-        X_t, X_tm1 = add_noise(d, t)
-        dataset["X_t"].append(X_t)
-        dataset["X_tm1"].append(X_tm1)
-    dataset["X_t"] = np.array(dataset["X_t"])
-    dataset["X_tm1"] = np.array(dataset["X_tm1"]) 
-    return dataset
+        t = random.randint(0, 99)
+        X_t, X_tm1 = add_noise(d, t, beta_t, alpha, alpha_bar)
+        X_t_arr.append(X_t)
+        X_tm1_arr.append(X_tm1)
+
+    return X_t_arr, X_tm1_arr
+
+def denoise(model, X, T = 100):
+    X = torch.tensor(X).unsqueeze(0).unsqueeze(0).to(device)
+    for _ in range(T):
+        X_noise = model(X) 
+        X = X - X_noise
+    return X
 
 class MyDataset(Dataset):
     def __init__(self, data_dict):
@@ -228,19 +244,11 @@ def print_metaData(n, batch_size):
     print(n, batch_size)
 
 
-model_big = BigUNet().double().to(device)
-model_medBig = MedBigUNet().double().to(device)
-model_medium = MediumUNet().double().to(device)
-model_small = SmallUNet().double().to(device)
-modelList = [model_big, model_medBig, model_medium, model_small]
-modelNames = ["model_big", "model_medBig", "model_medium", "model_small"]
-
-
 def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
     #loss
     loss_fn = nn.MSELoss()
     #optimizer
-    optimizer = optim.Adam(model_big.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     #loss data
@@ -294,22 +302,32 @@ def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
     model.train(False)
     return np.array(running_loss_arr)
 
+def run():
+    n = 64000
+    batch_size = 64
+    epochs = 1
 
-n = 64000
-batch_size = 64
-epochs = 1
-for name, model in zip(modelNames, modelList):
-    print("#####################################")
-    print("n: ", n)
-    print("batch_size: ", batch_size)
-    print("Epochs: ", epochs)
-    print("model: ", model)
-    
-    running_loss_arr = train_model(model, n = n, batch_size = batch_size, EPOCHS = epochs)
+    model_big = BigUNet().double().to(device)
+    model_medBig = MedBigUNet().double().to(device)
+    model_medium = MediumUNet().double().to(device)
+    model_small = SmallUNet().double().to(device)
+    modelList = [model_big, model_medBig, model_medium, model_small]
+    modelNames = ["model_big", "model_medBig", "model_medium", "model_small"]
 
-    torch.save(model.state_dict(), 'output/model_param_' + name + '.pt')
-    df_loss = pd.DataFrame({"time": running_loss_arr.reshape(-1, 2).transpose()[0], "loss": running_loss_arr.reshape(-1, 2).transpose()[1]})
-    df_loss.to_csv('output/losses' + name + '.csv', index = False)
-    print("#####################################")
+    for name, model in zip(modelNames, modelList):
+        print("#####################################")
+        print("n: ", n)
+        print("batch_size: ", batch_size)
+        print("Epochs: ", epochs)
+        print("model: ", model)
+
+        running_loss_arr = train_model(model, n = n, batch_size = batch_size, EPOCHS = epochs)
+
+        torch.save(model.state_dict(), 'output/model_param_' + name + '.pt')
+        df_loss = pd.DataFrame({"time": running_loss_arr.reshape(-1, 2).transpose()[0], "loss": running_loss_arr.reshape(-1, 2).transpose()[1]})
+        df_loss.to_csv('output/losses' + name + '.csv', index = False)
+        print("#####################################")
 
 
+if __name__ == "__main__":
+    run()
