@@ -1,3 +1,7 @@
+
+##########################################################################################
+# Import libraries
+##########################################################################################
 import pandas as pd 
 import numpy as np
 import math 
@@ -15,6 +19,10 @@ import torch.optim as optim
 
 import pickle 
 
+
+##########################################################################################
+# Data
+##########################################################################################
 with open('data/sampled_filters_train.pkl', 'rb') as f:
     data = pickle.load(f)
 
@@ -43,13 +51,16 @@ def get_data(data):
     names=data['filter_names']
     filter_wls = [int(name[1:-1].rstrip('W')) for name in names]
     filter_wls = [element for i, element in enumerate(filter_wls) if i not in outlier_columns]
-    indices=[0,10,30,500,15000,800000]
     return filter_wls, wavelengths, spectra, X, X_normalized, y, z
+
 filter_wls, wavelengths, spectra, X, X_normalized, y, z = get_data(data)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using {device} device")
 
+##########################################################################################
+# Define U-Networks
+##########################################################################################
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(DoubleConv, self).__init__()
@@ -192,58 +203,67 @@ class SmallUNet(nn.Module):
         x = self.convOut(x1)
         return x
 
+##########################################################################################
+# Forward diffusion process and Dataset generating
+##########################################################################################
+def cos_betaAlpha_schedule(T = 300, s=0.005):
+    x = torch.linspace(0, T, T+1)
+    alphas_cumprod = torch.cos(((x / T) + s) / (1 + s) * torch.pi * 0.5) ** 2
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+    betas = torch.clip(betas, 0.0001, 0.9999)
+    alpha_bar = np.cumprod(np.array([1-betas[i] for i in range(len(betas))]))
+    return betas, alpha_bar
 
-def add_noise(X, t, beta_t, alpha, alpha_bar, T = 100):
-
-    mu, sigma = math.sqrt(alpha_bar[t]) * X, (1 - alpha_bar[t]) * np.identity(len(X))
-    X_tm1 = np.random.multivariate_normal(mu, sigma)
+def add_noise(X, t, beta_t, alpha_bar):
+    if t == 0:
+        X_tm1 = X.numpy()
+    else:
+        mu, sigma = math.sqrt(alpha_bar[t - 1]) * X, (1 - alpha_bar[t - 1]) * np.identity(len(X))
+        X_tm1 = np.random.multivariate_normal(mu, sigma)
     mu, sigma = math.sqrt(1 - beta_t[t]) * X_tm1, (beta_t[t]) * np.identity(len(X_tm1))
     X_t = np.random.multivariate_normal(mu, sigma)
     pred_noise =  X_t - X_tm1
-    return list(X_t), list(pred_noise)
+    return X_t, pred_noise
 
-def gen_dataset(data):
-    T = 100
-
+def gen_dataset(data, T = 300):
     X_t_arr = []
-    X_tm1_arr = []
+    X_noise_arr = []
 
-    beta_t = np.array([0.0001 * (1.05**i) for i in range(T)])
-    alpha = np.array([1-beta_t[i] for i in range(len(beta_t))])
-    alpha_bar = np.cumprod(alpha)
+    beta_t, alpha_bar = cos_betaAlpha_schedule(T = T)
 
     for d in data:
-        t = random.randint(0, 99)
-        X_t, X_tm1 = add_noise(d, t, beta_t, alpha, alpha_bar)
-        X_t_arr.append(X_t)
-        X_tm1_arr.append(X_tm1)
+        t = np.random.randint(0, T)
+        X_t, X_noise = add_noise(d, t, beta_t, alpha_bar)
+        X_t_arr.append(list(X_t))
+        X_noise_arr.append(list(X_noise))
 
-    return X_t_arr, X_tm1_arr
-
-def denoise(model, X, T = 100):
-    X = torch.tensor(X).unsqueeze(0).unsqueeze(0).to(device)
-    for _ in range(T):
-        X_noise = model(X) 
-        X = X - X_noise
-    return X
+    return X_t_arr, X_noise_arr
 
 class MyDataset(Dataset):
     def __init__(self, data_dict):
         self.data_dict = data_dict
         self.keys = list(data_dict.keys())
         self.length = len(data_dict[self.keys[0]])
-    
+
     def __len__(self):
         return self.length
     
     def __getitem__(self, index):
         data = {key: self.data_dict[key][index] for key in self.keys}
         return data
-    
-def print_metaData(n, batch_size):
-    print(n, batch_size)
+
+def denoise(model, X, T = 300):
+    X = torch.tensor(X).unsqueeze(0).unsqueeze(0).to(device)
+    for _ in range(T):
+        X_noise = model(X)
+        X = X - X_noise
+    return X
 
 
+##########################################################################################
+# Train model(s)
+##########################################################################################
 def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
     #loss
     loss_fn = nn.MSELoss()
@@ -256,11 +276,15 @@ def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
 
     #training
     model.train(True)
+    with open("runs/foo.txt", "w") as f:
+        f.write("start \n")
     for epoch in range(EPOCHS):
+        with open("runs/foo.txt", "a") as f:
+            f.write("epoch: " + str(epoch) + "\n")
         # generate data_loader
-        dataset = MyDataset(gen_dataset(X_normalized[0:n]))
-        train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        train_dataloader = DataLoader(MyDataset({"X": X_normalized[:n]}), batch_size=batch_size, shuffle=False)
         
+        print()
         
         
         print('EPOCH ', epoch, ":")
@@ -270,9 +294,9 @@ def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
 
         for i, data in enumerate(train_dataloader):
             # Every data instance is an input + label pair
-            X_t, X_tm1 = data.values()
-            X_t = X_t.unsqueeze(1).double().to(device)
-            X_tm1 = X_tm1.unsqueeze(1).double().to(device)
+            X_t, X_tm1 = gen_dataset(data['X'])
+            X_t = torch.tensor(X_t).unsqueeze(1).double().to(device)
+            X_tm1 = torch.tensor(X_tm1).unsqueeze(1).double().to(device)
             # Zero gradients for every batch
             optimizer.zero_grad()
 
@@ -294,7 +318,8 @@ def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
                 tb_x = epoch * len(train_dataloader) + i + 1
                 running_loss_arr.append([tb_x, last_loss])
                 running_loss = 0.
-
+                with open("runs/foo.txt", "a") as f:
+                    f.write(str(last_loss) + "\n")
         scheduler.step()
 
         print('LOSS train: ', running_loss_arr[-1])
@@ -302,6 +327,10 @@ def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
     model.train(False)
     return np.array(running_loss_arr)
 
+
+##########################################################################################
+# run
+##########################################################################################
 def run():
     n = 64000
     batch_size = 64
@@ -323,9 +352,9 @@ def run():
 
         running_loss_arr = train_model(model, n = n, batch_size = batch_size, EPOCHS = epochs)
 
-        torch.save(model.state_dict(), 'output/model_param_' + name + '.pt')
+        torch.save(model.state_dict(), 'runs/model_param_' + name + '.pt')
         df_loss = pd.DataFrame({"time": running_loss_arr.reshape(-1, 2).transpose()[0], "loss": running_loss_arr.reshape(-1, 2).transpose()[1]})
-        df_loss.to_csv('output/losses' + name + '.csv', index = False)
+        df_loss.to_csv('runs/losses' + name + '.csv', index = False)
         print("#####################################")
 
 
