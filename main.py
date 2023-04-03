@@ -259,6 +259,7 @@ def denoise(model, X, T = 300):
         X_noise = model(X)
         X = X - X_noise
     return X
+<<<<<<< HEAD
 
 def denoise_batch(model, X, T = 300):
     X = torch.tensor(X).unsqueeze(1).to(device)
@@ -266,6 +267,8 @@ def denoise_batch(model, X, T = 300):
         X_noise = model(X)
         X = X - X_noise
     return X
+=======
+>>>>>>> 6de2b3d50ecadc31d9a7ba9bb3f84f87851354af
 
 
 ##########################################################################################
@@ -290,7 +293,14 @@ def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
             f.write("epoch: " + str(epoch) + "\n")
         # generate data_loader
         train_dataloader = DataLoader(MyDataset({"X": X_normalized[:n]}), batch_size=batch_size, shuffle=False)
+<<<<<<< HEAD
 
+=======
+        
+        print()
+        
+        
+>>>>>>> 6de2b3d50ecadc31d9a7ba9bb3f84f87851354af
         print('EPOCH ', epoch, ":")
         
         running_loss = 0
