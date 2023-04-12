@@ -215,92 +215,64 @@ def cos_betaAlpha_schedule(T = 300, s=0.005):
     alpha_bar = np.cumprod(np.array([1-betas[i] for i in range(len(betas))]))
     return betas, alpha_bar
 
-def add_noise(X, t, beta_t, alpha_bar):
-    if t == 0:
-        X_tm1 = X.numpy()
-    else:
-        mu, sigma = math.sqrt(alpha_bar[t - 1]) * X, (1 - alpha_bar[t - 1]) * np.identity(len(X))
-        X_tm1 = np.random.multivariate_normal(mu, sigma)
-    mu, sigma = math.sqrt(1 - beta_t[t]) * X_tm1, (beta_t[t]) * np.identity(len(X_tm1))
-    X_t = np.random.multivariate_normal(mu, sigma)
-    pred_noise =  X_t - X_tm1
-    return X_t, pred_noise
 
-def gen_dataset(data, T = 300):
-    X_t_arr = []
-    X_noise_arr = []
+def add_noise(X, t, alpha_bar):
+    eps = torch.randn_like(X)
+    mean = math.sqrt(alpha_bar[t - 1]) * X
+    std = math.sqrt(1 - alpha_bar[t - 1])
+    sample = mean + std * eps
+    return sample, eps
 
-    beta_t, alpha_bar = cos_betaAlpha_schedule(T = T)
 
-    for d in data:
-        t = np.random.randint(0, T)
-        X_t, X_noise = add_noise(d, t, beta_t, alpha_bar)
-        X_t_arr.append(list(X_t))
-        X_noise_arr.append(list(X_noise))
+def denoise(model, X, T = 300):
+    betas, alpha_bar = cos_betaAlpha_schedule()
 
-    return X_t_arr, X_noise_arr
+    X = torch.tensor(X)
+    X_noise = torch.zeros(len(X))
+    for t in range(T-1, -1, -1):
+        mu_t = (1 / math.sqrt(1 - betas[t])) * (X - (betas[t])/(math.sqrt(1 - alpha_bar[t])) * X_noise)
+        X = torch.tensor(np.random.multivariate_normal(mu_t, betas[T - 1] * np.identity(31)))
+
+        X_noise = model(X.unsqueeze(0).unsqueeze(0).to(device))
+        X = X - X_noise
+    return X
 
 class MyDataset(Dataset):
     def __init__(self, data_dict):
         self.data_dict = data_dict
         self.keys = list(data_dict.keys())
         self.length = len(data_dict[self.keys[0]])
-
+    
     def __len__(self):
         return self.length
     
     def __getitem__(self, index):
         data = {key: self.data_dict[key][index] for key in self.keys}
         return data
-
-def denoise(model, X, T = 300):
-    X = torch.tensor(X).unsqueeze(0).unsqueeze(0).to(device)
-    for _ in range(T):
-        X_noise = model(X)
-        X = X - X_noise
-    return X
-<<<<<<< HEAD
-
-def denoise_batch(model, X, T = 300):
-    X = torch.tensor(X).unsqueeze(1).to(device)
-    for _ in range(T):
-        X_noise = model(X)
-        X = X - X_noise
-    return X
-=======
->>>>>>> 6de2b3d50ecadc31d9a7ba9bb3f84f87851354af
-
-
 ##########################################################################################
 # Train model(s)
 ##########################################################################################
-def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
+def train_model(model, n = len(X_normalized), T = 300, batch_size = 256, EPOCHS = 50):
     #loss
     loss_fn = nn.MSELoss()
     #optimizer
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
-
+    beta_t, alpha_bar = cos_betaAlpha_schedule(T = T)
     #loss data
     running_loss_arr = []
 
     #training
     model.train(True)
-    with open("runs/foo.txt", "w") as f:
+    with open("../runs/foo.txt", "w") as f:
         f.write("start \n")
     for epoch in range(EPOCHS):
-        with open("runs/foo.txt", "a") as f:
+        with open("../runs/foo.txt", "a") as f:
             f.write("epoch: " + str(epoch) + "\n")
         # generate data_loader
-        train_dataloader = DataLoader(MyDataset({"X": X_normalized[:n]}), batch_size=batch_size, shuffle=False)
-<<<<<<< HEAD
-
-=======
-        
-        print()
+        train_dataloader = DataLoader(MyDataset({"X": torch.tensor(X_normalized[:n])}), batch_size=batch_size, shuffle=False)
         
         
->>>>>>> 6de2b3d50ecadc31d9a7ba9bb3f84f87851354af
         print('EPOCH ', epoch, ":")
         
         running_loss = 0
@@ -308,9 +280,10 @@ def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
 
         for i, data in enumerate(train_dataloader):
             # Every data instance is an input + label pair
-            X_t, X_tm1 = gen_dataset(data['X'])
-            X_t = torch.tensor(X_t).unsqueeze(1).double().to(device)
-            X_tm1 = torch.tensor(X_tm1).unsqueeze(1).double().to(device)
+            t = np.random.randint(1, T + 1)
+            X_t, X_noise = add_noise(data['X'], t, alpha_bar)
+            X_t = X_t.unsqueeze(1).double().to(device)
+            X_noise = X_noise.unsqueeze(1).double().to(device)
             # Zero gradients for every batch
             optimizer.zero_grad()
 
@@ -318,8 +291,8 @@ def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
             outputs = model(X_t)
             
             # Compute the loss and its gradients
-            loss = loss_fn(outputs, X_tm1)
-
+            loss = loss_fn(outputs, X_noise)
+            
             loss.backward()
 
             # Adjust learning weights
@@ -332,7 +305,7 @@ def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
                 tb_x = epoch * len(train_dataloader) + i + 1
                 running_loss_arr.append([tb_x, last_loss])
                 running_loss = 0.
-                with open("runs/foo.txt", "a") as f:
+                with open("../runs/foo.txt", "a") as f:
                     f.write(str(last_loss) + "\n")
         scheduler.step()
 
@@ -346,9 +319,9 @@ def train_model(model, n = len(X_normalized), batch_size = 256, EPOCHS = 50):
 # run
 ##########################################################################################
 def run():
-    n = 64000
-    batch_size = 64
-    epochs = 1
+    n = len(X_normalized)
+    batch_size = 512
+    epochs = 30
 
     model_big = BigUNet().double().to(device)
     model_medBig = MedBigUNet().double().to(device)
@@ -356,6 +329,8 @@ def run():
     model_small = SmallUNet().double().to(device)
     modelList = [model_big, model_medBig, model_medium, model_small]
     modelNames = ["model_big", "model_medBig", "model_medium", "model_small"]
+    modelList = [model_big]
+    modelNames = ["model_big"]
 
     for name, model in zip(modelNames, modelList):
         print("#####################################")
