@@ -80,19 +80,6 @@ class DoubleConv(nn.Module):
         x = self.relu2(x)
         return x
 
-class SingleConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(SingleConv, self).__init__()
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn = nn.BatchNorm1d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
-        
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.bn(x)
-        x = self.relu(x)
-        return x
-
 class Down(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(Down, self).__init__()
@@ -142,66 +129,6 @@ class BigUNet(nn.Module):
         x = self.convOut(x1)
         return x
     
-class MedBigUNet(nn.Module):
-    def __init__(self):
-        super(MedBigUNet, self).__init__()
-        self.conv = DoubleConv(1, 32)
-        self.down1 = Down(32, 64)
-        self.down2 = Down(64, 128)
-        self.down3 = Down(128, 256)
-        self.up2 = Up(256, 128)
-        self.up3 = Up(128, 64)
-        self.up4 = Up(64, 32)
-        self.convOut = nn.Conv1d(32, 1, kernel_size = 1)
-
-    def forward(self, x):
-        x1 = self.conv(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x3 = self.up2(x4, x3)
-        x2 = self.up3(x3, x2)
-        x1 = self.up4(x2, x1)
-        x = self.convOut(x1)
-        return x
-
-class MediumUNet(nn.Module):
-    def __init__(self):
-        super(MediumUNet, self).__init__()
-        self.conv = DoubleConv(1, 64)
-        self.down1 = Down(64, 128)
-        self.down2 = Down(128, 256)
-        self.up1 = Up(256, 128)
-        self.up2 = Up(128, 64)
-        self.convOut = nn.Conv1d(64, 1, kernel_size = 1)
-        
-    def forward(self, x):
-        x1 = self.conv(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x2 = self.up1(x3, x2)
-        x1 = self.up2(x2, x1)
-        x = self.convOut(x1)
-        return x
-
-class SmallUNet(nn.Module):
-    def __init__(self):
-        super(SmallUNet, self).__init__()
-        self.conv = DoubleConv(1, 32)
-        self.down1 = DoubleConv(32, 64)
-        self.down2 = DoubleConv(64, 128)
-        self.up1 = Up(128, 64)
-        self.up2 = Up(64, 32)
-        self.convOut = nn.Conv1d(32, 1, kernel_size = 1)
-        
-    def forward(self, x):
-        x1 = self.conv(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x2 = self.up1(x3, x2)
-        x1 = self.up2(x2, x1)
-        x = self.convOut(x1)
-        return x
 
 ##########################################################################################
 # Forward diffusion process and Dataset generating
@@ -349,3 +276,51 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
